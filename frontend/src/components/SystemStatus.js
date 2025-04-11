@@ -10,11 +10,13 @@ const SystemStatus = ({ channels }) => {
         ) : (
           channels.map((channel, index) => (
             <li key={index} className="channel-item">
-              {Object.entries(channel).map(([key, value]) => (
-                <span key={key}>
-                  <strong>{key}:</strong> {JSON.stringify(value)}<br />
-                </span>
-              ))}
+              {Object.entries(channel)
+                .filter(([key]) => key !== 'account_ids') // Exclude account_ids
+                .map(([key, value]) => (
+                  <span key={key}>
+                    <strong>{key}:</strong> {JSON.stringify(value)}<br />
+                  </span>
+                ))}
             </li>
           ))
         )}

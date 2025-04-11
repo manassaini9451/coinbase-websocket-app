@@ -153,7 +153,6 @@ wss.on('connection', async (ws) => {
   if (availableNames.length > 0) {
     userId = availableNames[Math.floor(Math.random() * availableNames.length)];
   } else {
-    // If all names are used, append a number
     let counter = 1;
     do {
       userId = `${randomNames[Math.floor(Math.random() * randomNames.length)]}${counter}`;
@@ -268,7 +267,7 @@ wss.on('connection', async (ws) => {
         }
       }
     });
-    usedNames.delete(userId); // Free up the name for reuse
+    usedNames.delete(userId); // Free up name
   });
 
   ws.on('error', (error) => {
@@ -279,7 +278,9 @@ wss.on('connection', async (ws) => {
 // Start the server
 const startServer = async () => {
   const dbSuccess = await connectWithRetry();
-  if (!dbSuccess) {
+  if
+
+ (!dbSuccess) {
     console.log('Proceeding with in-memory storage due to MongoDB failure');
   }
   initializeWebSocket();
