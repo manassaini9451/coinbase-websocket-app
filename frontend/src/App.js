@@ -17,33 +17,29 @@ function App() {
 
   const connectWebSocket = () => {
     const websocket = new WebSocket('ws://localhost:4000/ws');
+
     websocket.onopen = () => {
       console.log('WebSocket connected');
       setWs(websocket);
-      while (pendingRequests.current.length > 0) {
-        const { product, action } = pendingRequests.current.shift();
+      pendingRequests.current.forEach(({ product, action }) => {
         if (websocket.readyState === WebSocket.OPEN) {
           websocket.send(JSON.stringify({ action, product }));
         }
-      }
+      });
+      pendingRequests.current = [];
     };
 
     websocket.onmessage = (event) => {
-      const { type, product, data, products } = JSON.parse(event.data);
-      console.log('Received message:', { type, product, data, products });
-
+      const { type, product, data, userId: receivedUserId, products } = JSON.parse(event.data);
       switch (type) {
         case 'userId':
-          setUserId(data);
+          setUserId(receivedUserId);
           break;
         case 'subscriptions':
-          setSubscriptions(products || []); // Sync from server only
+          setSubscriptions(products || []);
           break;
         case 'price':
-          setPrices(prev => ({
-            ...prev,
-            [product]: { bids: data.bids || [], asks: data.asks || [] },
-          }));
+          setPrices(prev => ({ ...prev, [product]: data }));
           break;
         case 'match':
           setMatches(prev => ({
@@ -71,9 +67,7 @@ function App() {
       }
     };
 
-    websocket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
+    websocket.onerror = (error) => console.error('WebSocket error:', error);
 
     return websocket;
   };
@@ -81,31 +75,21 @@ function App() {
   useEffect(() => {
     const websocket = connectWebSocket();
     return () => {
-      if (websocket.readyState === WebSocket.OPEN) {
-        websocket.close();
-      }
-      if (reconnectTimeout.current) {
-        clearTimeout(reconnectTimeout.current);
-      }
+      if (websocket.readyState === WebSocket.OPEN) websocket.close();
+      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
     };
   }, []);
 
   const handleSubscribe = (product, action) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action, product }));
+      setSubscriptions(prev =>
+        action === 'subscribe' ? [...new Set([...prev, product])] : prev.filter(p => p !== product)
+      );
     } else {
-      console.log('WebSocket not ready, queuing request:', { product, action });
       pendingRequests.current.push({ product, action });
     }
   };
-
-  // 50ms refresh for Price View
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setPrices(prev => ({ ...prev })); // Trigger re-render
-    }, 50);
-    return () => clearInterval(interval);
-  }, []);
 
   return (
     <div className="app-container">
@@ -115,7 +99,6 @@ function App() {
       </header>
       <main className="app-main">
         <section className="subscribe-section">
-          <h2>Subscribe/Unsubscribe</h2>
           <SubscribeControl subscriptions={subscriptions} onSubscribe={handleSubscribe} />
         </section>
         <div className="dashboard-grid">
