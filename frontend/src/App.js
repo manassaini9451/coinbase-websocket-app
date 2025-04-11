@@ -7,7 +7,7 @@ import './styles.css';
 
 function App() {
   const [ws, setWs] = useState(null);
-  const [userId, setUserId] = useState(null);
+  const [userId, setUserId] = useState(localStorage.getItem('userId')); // Initialize from localStorage
   const [subscriptions, setSubscriptions] = useState([]);
   const [prices, setPrices] = useState({});
   const [matches, setMatches] = useState({});
@@ -34,6 +34,7 @@ function App() {
       switch (type) {
         case 'userId':
           setUserId(receivedUserId);
+          localStorage.setItem('userId', receivedUserId); // Store userId in localStorage
           break;
         case 'subscriptions':
           setSubscriptions(products || []);

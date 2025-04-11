@@ -11,6 +11,10 @@ const wss = new WebSocket.Server({ server, path: '/ws' });
 const COINBASE_WS_URL = 'wss://ws-feed.exchange.coinbase.com';
 const PRODUCTS = ['BTC-USD', 'ETH-USD', 'XRP-USD', 'LTC-USD'];
 
+// List of random names and tracking for uniqueness
+const randomNames = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank', 'Grace', 'Henry', 'Ivy', 'Jack'];
+const usedNames = new Set();
+
 const orderBooks = new Map();
 const matches = new Map();
 const clients = new Map();
@@ -24,6 +28,8 @@ const connectWithRetry = async () => {
       await mongoose.connect('mongodb://127.0.0.1:27017/coinbase_pro', {
         serverSelectionTimeoutMS: 5000,
         connectTimeoutMS: 10000,
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
       });
       console.log('MongoDB connected successfully');
       return true;
@@ -53,13 +59,15 @@ const initializeWebSocket = () => {
         product_ids: Array.from(activeSubscriptions),
         channels: ['level2', 'matches'],
       });
-      console.log('Sending subscription:', subscribeMessage);
+      console.log('Sending initial subscription:', subscribeMessage);
       coinbaseWs.send(subscribeMessage);
     }
   });
 
   coinbaseWs.on('message', (data) => {
     const msg = JSON.parse(data);
+    console.log('Received from Coinbase:', msg.type);
+
     switch (msg.type) {
       case 'snapshot':
         orderBooks.set(msg.product_id, { bids: msg.bids || [], asks: msg.asks || [] });
@@ -78,35 +86,48 @@ const initializeWebSocket = () => {
         broadcastToSubscribed(msg.product_id, 'match', msg);
         break;
       case 'subscriptions':
+        console.log('Active channels:', msg.channels);
         broadcastToAll('channels', msg.channels);
         break;
       case 'error':
         console.error('Coinbase WebSocket Error:', msg.message);
         break;
+      default:
+        console.log('Unhandled message:', msg);
+        break;
     }
   });
 
-  coinbaseWs.on('close', () => {
-    console.log('Coinbase WebSocket closed, reconnecting...');
+  coinbaseWs.on('close', (code, reason) => {
+    console.log('Coinbase WebSocket closed, Code:', code, 'Reason:', reason.toString());
+    console.log('Reconnecting in 2 seconds...');
     setTimeout(initializeWebSocket, 2000);
   });
 
-  coinbaseWs.on('error', (error) => console.error('Coinbase WebSocket Error:', error.message));
+  coinbaseWs.on('error', (error) => {
+    console.error('Coinbase WebSocket Error:', error.message);
+  });
 };
 
-// Update Order Book
+// Update order book based on l2update
 function updateOrderBook(update) {
   const book = orderBooks.get(update.product_id);
   update.changes.forEach(([side, price, size]) => {
     const bookSide = side === 'buy' ? book.bids : book.asks;
-    const index = bookSide.findIndex(([p]) => p === price);
-    if (size === '0' && index !== -1) bookSide.splice(index, 1);
-    else if (index !== -1) bookSide[index] = [price, size];
-    else bookSide.push([price, size]);
+    const priceNum = price;
+    const sizeNum = size;
+    const index = bookSide.findIndex(([p]) => p === priceNum);
+    if (sizeNum === '0') {
+      if (index !== -1) bookSide.splice(index, 1);
+    } else if (index !== -1) {
+      bookSide[index] = [priceNum, sizeNum];
+    } else {
+      bookSide.push([priceNum, sizeNum]);
+    }
   });
 }
 
-// Broadcast Functions
+// Broadcast to subscribed clients
 function broadcastToSubscribed(product, type, data) {
   clients.forEach(({ userId, subscriptions }, ws) => {
     if (subscriptions.includes(product) && ws.readyState === WebSocket.OPEN) {
@@ -115,6 +136,7 @@ function broadcastToSubscribed(product, type, data) {
   });
 }
 
+// Broadcast to all clients
 function broadcastToAll(type, data) {
   clients.forEach((_, ws) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -123,11 +145,25 @@ function broadcastToAll(type, data) {
   });
 }
 
-// WebSocket Client Handling
+// Handle WebSocket client connections
 wss.on('connection', async (ws) => {
-  const userId = uuidv4();
+  // Generate unique random name
+  let userId;
+  const availableNames = randomNames.filter(name => !usedNames.has(name));
+  if (availableNames.length > 0) {
+    userId = availableNames[Math.floor(Math.random() * availableNames.length)];
+  } else {
+    // If all names are used, append a number
+    let counter = 1;
+    do {
+      userId = `${randomNames[Math.floor(Math.random() * randomNames.length)]}${counter}`;
+      counter++;
+    } while (usedNames.has(userId));
+  }
+  usedNames.add(userId);
+
   let subscriptions = [];
-  const dbConnected = mongoose.connection.readyState === 1;
+  let dbConnected = mongoose.connection.readyState === 1;
 
   if (dbConnected) {
     try {
@@ -138,7 +174,11 @@ wss.on('connection', async (ws) => {
       subscriptions = subDoc.products;
     } catch (err) {
       console.error(`Error loading subscriptions for user ${userId}:`, err.message);
+      subscriptions = [];
     }
+  } else {
+    console.log(`Using in-memory subscriptions for user ${userId} due to DB failure`);
+    subscriptions = [];
   }
 
   clients.set(ws, { userId, subscriptions });
@@ -147,7 +187,7 @@ wss.on('connection', async (ws) => {
   console.log(`User ${userId} connected`);
 
   ws.on('message', async (message) => {
-    let { action, product } = JSON.parse(message);
+    const { action, product } = JSON.parse(message);
     if (!PRODUCTS.includes(product)) return;
 
     let clientData = clients.get(ws);
@@ -157,11 +197,13 @@ wss.on('connection', async (ws) => {
       updatedSubscriptions.push(product);
       activeSubscriptions.add(product);
       if (coinbaseWs.readyState === WebSocket.OPEN) {
-        coinbaseWs.send(JSON.stringify({
+        const subscribeMessage = JSON.stringify({
           type: 'subscribe',
           product_ids: [product],
           channels: ['level2', 'matches'],
-        }));
+        });
+        console.log(`User ${userId} subscribed to ${product}, sending:`, subscribeMessage);
+        coinbaseWs.send(subscribeMessage);
       }
     } else if (action === 'unsubscribe' && updatedSubscriptions.includes(product)) {
       updatedSubscriptions = updatedSubscriptions.filter(p => p !== product);
@@ -172,11 +214,13 @@ wss.on('connection', async (ws) => {
       if (!stillSubscribed) {
         activeSubscriptions.delete(product);
         if (coinbaseWs.readyState === WebSocket.OPEN) {
-          coinbaseWs.send(JSON.stringify({
+          const unsubscribeMessage = JSON.stringify({
             type: 'unsubscribe',
             product_ids: [product],
             channels: ['level2', 'matches'],
-          }));
+          });
+          console.log(`User ${userId} unsubscribed from ${product}, sending:`, unsubscribeMessage);
+          coinbaseWs.send(unsubscribeMessage);
         }
       }
     }
@@ -186,14 +230,17 @@ wss.on('connection', async (ws) => {
 
     if (dbConnected) {
       try {
-        await Subscription.updateOne(
+        await Subscription.findOneAndUpdate(
           { userId },
           { products: updatedSubscriptions, lastUpdated: Date.now() },
-          { upsert: true }
+          { upsert: true, new: true, runValidators: true }
         );
+        console.log(`Updated subscriptions for user ${userId}:`, updatedSubscriptions);
       } catch (err) {
-        console.error(`DB update failed for user ${userId}:`, err.message);
+        console.error(`Failed to update subscriptions in DB for user ${userId}:`, err.message);
       }
+    } else {
+      console.log(`Subscriptions for user ${userId} updated in-memory:`, updatedSubscriptions);
     }
 
     ws.send(JSON.stringify({ type: 'subscriptions', products: updatedSubscriptions }));
@@ -211,22 +258,30 @@ wss.on('connection', async (ws) => {
       if (!stillSubscribed && activeSubscriptions.has(product)) {
         activeSubscriptions.delete(product);
         if (coinbaseWs.readyState === WebSocket.OPEN) {
-          coinbaseWs.send(JSON.stringify({
+          const unsubscribeMessage = JSON.stringify({
             type: 'unsubscribe',
             product_ids: [product],
             channels: ['level2', 'matches'],
-          }));
+          });
+          console.log(`No users subscribed to ${product}, sending:`, unsubscribeMessage);
+          coinbaseWs.send(unsubscribeMessage);
         }
       }
     });
+    usedNames.delete(userId); // Free up the name for reuse
   });
 
-  ws.on('error', (error) => console.error(`WebSocket error for user ${userId}:`, error.message));
+  ws.on('error', (error) => {
+    console.error(`WebSocket error for user ${userId}:`, error.message);
+  });
 });
 
-// Start Server
+// Start the server
 const startServer = async () => {
-  await connectWithRetry();
+  const dbSuccess = await connectWithRetry();
+  if (!dbSuccess) {
+    console.log('Proceeding with in-memory storage due to MongoDB failure');
+  }
   initializeWebSocket();
   server.listen(4000, () => console.log('Server running on port 4000'));
 };
